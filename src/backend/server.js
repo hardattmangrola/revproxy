@@ -1,22 +1,26 @@
-const http=require("http");
-const port=3001;
-const server=http.createServer((req,res)=>{
-    console.log(`[Backend] ${req.method} ${req.url}`);
-    let body="";
-    req.on("data",(chunk)=>{
-        body+=chunk;
-    });
-    req.on("end",()=>{
-        res.writeHead(200,{"Content-Type":"application/json"});
+const http = require("http");
+function createBackend(name, port) {
+    const server = http.createServer((req, res) => {
+        console.log(`[${name}] ${req.method} ${req.url}`);
+
+        res.writeHead(200, {
+            "Content-Type": "application/json"
+        });
+
         res.end(JSON.stringify({
-            message:"Response from backend",
-            method:req.method,
-            path:req.url,
-            receivedBody:body?JSON.parse(body):null
+            service: name,
+            message: `Response from ${name}`,
+            method: req.method,
+            path: req.url,
+            timestamp: new Date().toISOString()
         }));
     });
-});
 
-server.listen(port,()=>{
-    console.log(`Backend running on http://localhost:${port}`);
-});
+    server.listen(port, () => {
+        console.log(`${name} running on port ${port}`);
+    });
+}
+
+createBackend("User Service", 3001);
+createBackend("Product Service", 3002);
+createBackend("Order Service", 3003);
