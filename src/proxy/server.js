@@ -1,7 +1,6 @@
 const http=require("http");
+const resolveRoute=require("../router/router")
 const proxy_port=8080;
-const upstream_host="localhost";
-const upstream_port=3001;
 const timeout=15000;
 
 //Reuse upstream TCP Connections-> Connection Pooling
@@ -38,15 +37,29 @@ function filterHeaders(headers){
 const proxyServer=http.createServer((clientReq,clientRes)=>{
     console.log(`[Proxy] Incoming: ${clientReq.method} ${clientReq.url}`);
     
+    // Resolve the destination service
+    const resolved=resolveRoute(clientReq.url);
+    // Handle unkown routes
+    if(!resolved){
+        clientRes.writeHead(404,{"Content-Type": "application/json"});
+        clientRes.end(JSON.stringify({
+            error:"Route not found",
+            path:clientReq.url
+        }));
+        return ;
+    }
+    const {service, rewrittenPath}=resolved;
+    console.log(`[Proxy] Routing to ${service.name} (${service.port})`);
+    
     //configuring outgoing req
     const options={
-        hostname:upstream_host,
-        port:upstream_port,
-        path:clientReq.url,
+        hostname:service.host,
+        port:service.port,
+        path:rewrittenPath,
         method:clientReq.method,
         headers:{
             ...filterHeaders(clientReq.headers),
-            host:`${upstream_host}:${upstream_port}`
+            host:`${service.host}:${service.port}`
         },
         agent:upstreamAgent
     };
