@@ -2,7 +2,35 @@ const http=require("http");
 const resolveRoute=require("../router/router")
 const proxy_port=8080;
 const timeout=15000;
+const RoundRobin=require("../loadbalancer/roundRobin");
+const WeightedRoundRobin = require("../loadbalancer/weightedRoundRobin");
+const LeastConnections = require("../loadbalancer/leastConnections");
 
+const selectors={
+    roundRobin: new Map(),
+    weightedRoundRobin: new Map(),
+    leastConnections: new LeastConnections()
+};
+
+const strategy="weightedRoundRobin";
+function selectedBackend(serviceKey, instances){
+    if(strategy==='leastConnections'){
+        return selectors.leastConnections.select(instances);
+    }
+    const strategyMap=selectors[strategy];
+    if(!strategyMap){
+        throw new Error(`Unknown strategy: ${strategy}`);
+    }
+    if(!strategyMap.has(serviceKey)){
+        const selector=strategy==='roundRobin'
+        ? new RoundRobin()
+        : new WeightedRoundRobin();
+        strategyMap.set(serviceKey,selector);
+    }
+    return strategyMap
+                .get(serviceKey)
+                .select(instances);
+}
 //Reuse upstream TCP Connections-> Connection Pooling
 const upstreamAgent=new http.Agent({
     keepAlive:true, // Reuse sockets for subsequent requests
@@ -48,18 +76,38 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
         }));
         return ;
     }
-    const {service, rewrittenPath}=resolved;
-    console.log(`[Proxy] Routing to ${service.name} (${service.port})`);
+    const {service, serviceKey, rewrittenPath}=resolved;
+    const instance=selectedBackend(serviceKey,service.instances);
+    if(!instance){
+        clientRes.writeHead(503,{"Content-Type": "application/json"});
+        clientRes.end(JSON.stringify({
+            error: "Service Unavailable",
+            message: "No healthy backend instances available"
+        }));
+        return;
+    }
+    instance.activeConnections += 1;
+    let released = false;
+    function releaseConnection(){
+        if(released) return;
+
+        released = true;
+        instance.activeConnections = Math.max(
+            0,
+            instance.activeConnections - 1
+        );
+    }
+    console.log(`[Proxy] Routing to ${instance.id} (${instance.port})`);
     
     //configuring outgoing req
     const options={
-        hostname:service.host,
-        port:service.port,
+        hostname:instance.host,
+        port:instance.port,
         path:rewrittenPath,
         method:clientReq.method,
         headers:{
             ...filterHeaders(clientReq.headers),
-            host:`${service.host}:${service.port}`
+            host:`${instance.host}:${instance.port}`
         },
         agent:upstreamAgent
     };
@@ -67,15 +115,19 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
     // req to backend
     const upstreamReq=http.request(options,(upstreamRes)=>{
         console.log(`[Proxy] Backend responded: ${upstreamRes.statusCode}`);
+        upstreamRes.on("end",releaseConnection);
+        upstreamRes.on("close",releaseConnection);
         // forward backend status and header
         clientRes.writeHead(upstreamRes.statusCode, upstreamRes.headers);
         upstreamRes.on("aborted",()=>{
+            releaseConnection();
             console.error("[Proxy] Upstream response abroted");
             if(!clientRes.destroyed){
                 clientRes.destroy();
             }
         });    
         upstreamRes.on("error",(err)=>{
+            releaseConnection();
             console.error("[Proxy] Response stream error: ", err.message);
             if(!clientRes.destroyed){
                 clientRes.destroy();
@@ -92,6 +144,7 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
     });
     // backend connection error
     upstreamReq.on("error",(err)=>{
+        releaseConnection();
         console.log("[Proxy] Upstream Error:", err.message);
         if(clientRes.destroyed || clientRes.writableEnded){
             return;
@@ -108,12 +161,15 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
     });
     //client aborted the incoming request
     clientReq.on("aborted",()=>{
+        releaseConnection();
         console.log("[Proxy] Client aborted request");
         upstreamReq.destroy();
     });
+    clientReq.on("error",releaseConnection);
     // client disconnected before response completed
     clientRes.on("close",()=>{
         if(!clientRes.writableEnded){
+            releaseConnection();
             console.log("[Proxy] Client disconnected");
             upstreamReq.destroy();
         }

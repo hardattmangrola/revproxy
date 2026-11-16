@@ -37,6 +37,7 @@ function resolveRoute(requestUrl) {
             rewrittenPath+=parsedURL.search;
             return {
                 service,
+                serviceKey: route.service,
                 route,
                 orginalPath:pathname,
                 rewrittenPath
