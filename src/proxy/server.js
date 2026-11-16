@@ -2,47 +2,124 @@ const http=require("http");
 const proxy_port=8080;
 const upstream_host="localhost";
 const upstream_port=3001;
+const timeout=15000;
 
+//Reuse upstream TCP Connections-> Connection Pooling
+const upstreamAgent=new http.Agent({
+    keepAlive:true, // Reuse sockets for subsequent requests
+    maxSockets:100, // limit concurrent sockets per origin
+    maxFreeSockets:10 // limit idle sockets retained for reuse
+})
+
+//Remove hop-by-hop headers
+function filterHeaders(headers){
+    const result={...headers};
+    //connection can nominate additional hop-by-hop headers
+    if(result.connection){
+        result.connection.split(",").forEach((header)=>{
+            delete result[header.trim().toLowerCase()];
+        });
+    }
+
+    const hopByHop=[
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade"
+    ];
+
+    hopByHop.forEach((header)=>delete result[header]);
+    return result;
+}
 const proxyServer=http.createServer((clientReq,clientRes)=>{
     console.log(`[Proxy] Incoming: ${clientReq.method} ${clientReq.url}`);
     
     //configuring outgoing req
-    const proxyOptions={
+    const options={
         hostname:upstream_host,
         port:upstream_port,
         path:clientReq.url,
         method:clientReq.method,
         headers:{
-            ...clientReq.headers,
+            ...filterHeaders(clientReq.headers),
             host:`${upstream_host}:${upstream_port}`
-        }
+        },
+        agent:upstreamAgent
     };
 
     // req to backend
-    const upstreamReq=http.request(proxyOptions,(upstreamRes)=>{
+    const upstreamReq=http.request(options,(upstreamRes)=>{
         console.log(`[Proxy] Backend responded: ${upstreamRes.statusCode}`);
         // forward backend status and header
         clientRes.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-        //stream back response to client
-        upstreamRes.pipe(clientRes);    
+        upstreamRes.on("aborted",()=>{
+            console.error("[Proxy] Upstream response abroted");
+            if(!clientRes.destroyed){
+                clientRes.destroy();
+            }
+        });    
+        upstreamRes.on("error",(err)=>{
+            console.error("[Proxy] Response stream error: ", err.message);
+            if(!clientRes.destroyed){
+                clientRes.destroy();
+            }
+        });
+        //Stream response to client
+        upstreamRes.pipe(clientRes);
+    });
+    //Upstream socket inactivity timeout
+    upstreamReq.setTimeout(timeout,()=>{
+        const err=new Error("Upstream Timroue");
+        err.code="ETIMEDOUT";
+        upstreamReq.destroy(err);
     });
     // backend connection error
     upstreamReq.on("error",(err)=>{
         console.log("[Proxy] Upstream Error:", err.message);
+        if(clientRes.destroyed || clientRes.writableEnded){
+            return;
+        }
         if(!clientRes.headersSent){
-            clientRes.writeHead(502,{"Content-Type":"application/json"});
+            const status=err.code==="ETIMEDOUT"?504:502;
+            clientRes.writeHead(status,{"Content-Type":"application/json"});
             clientRes.end(JSON.stringify({
-                error:"Bad Gateway",
-                message:"Unable to reach upstream server"
-            }))
+                error:status===504?"Gateway Timeout": "Bad Gateway"
+            }));
         }else{
             clientRes.destroy(err);
         }
     });
-    // forward client request body to backend
+    //client aborted the incoming request
+    clientReq.on("aborted",()=>{
+        console.log("[Proxy] Client aborted request");
+        upstreamReq.destroy();
+    });
+    // client disconnected before response completed
+    clientRes.on("close",()=>{
+        if(!clientRes.writableEnded){
+            console.log("[Proxy] Client disconnected");
+            upstreamReq.destroy();
+        }
+    });
+    // forward request body 
     clientReq.pipe(upstreamReq);
 });
 
 proxyServer.listen(proxy_port,()=>{
     console.log(`Reverse Proxy running on http://localhost:${proxy_port}`);
 });
+
+function shutdown(){
+    console.log("[Proxy] Shutting down...");
+    proxyServer.close(()=>{
+        upstreamAgent.destroy();
+        console.log("[Proxy] Server cllosed");
+        
+    });
+}
+process.on("SIGNINT", shutdown);
+process.on("SIGTERM",shutdown);
