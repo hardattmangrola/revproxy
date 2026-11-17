@@ -1,3 +1,5 @@
+const isEligible = require("./eligibility");
+
 class WeightedRoundRobin{
     constructor(){
         this.currentWeights=new Map();
@@ -5,7 +7,7 @@ class WeightedRoundRobin{
     select(instances){
         const available=instances.filter(
             instance=>
-                instance.healthy &&
+                isEligible(instance) &&
                 Number.isFinite(instance.weight) &&
                 instance.weight>0
         );

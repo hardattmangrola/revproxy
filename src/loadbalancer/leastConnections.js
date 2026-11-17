@@ -1,8 +1,8 @@
+const isEligible = require("./eligibility");
+
 class LeastConnections{
     select(instances){
-        const available=instances.filter(
-            instance=>instance.healthy
-        );
+        const available=instances.filter(isEligible);
         if(available.length===0){
             return null;
         }

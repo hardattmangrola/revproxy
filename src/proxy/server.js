@@ -5,7 +5,12 @@ const timeout=15000;
 const RoundRobin=require("../loadbalancer/roundRobin");
 const WeightedRoundRobin = require("../loadbalancer/weightedRoundRobin");
 const LeastConnections = require("../loadbalancer/leastConnections");
-
+const services=require("../registry/services");
+const {startHealthChecks}=require("../health/healthChecker");
+const {
+    recordFailure,
+    recordSuccess
+}=require("../health/healthManager");
 const selectors={
     roundRobin: new Map(),
     weightedRoundRobin: new Map(),
@@ -115,10 +120,20 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
     // req to backend
     const upstreamReq=http.request(options,(upstreamRes)=>{
         console.log(`[Proxy] Backend responded: ${upstreamRes.statusCode}`);
+        if(upstreamRes.statusCode>=500){
+            instance.breaker.failure();
+            recordFailure(instance,`HTTP ${upstreamRes.statusCode}`);
+        }else{
+            instance.breaker.success();
+            recordSuccess(instance);
+        }
         upstreamRes.on("end",releaseConnection);
         upstreamRes.on("close",releaseConnection);
         // forward backend status and header
-        clientRes.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+        clientRes.writeHead(
+            upstreamRes.statusCode,
+            filterHeaders(upstreamRes.headers)
+        );
         upstreamRes.on("aborted",()=>{
             releaseConnection();
             console.error("[Proxy] Upstream response abroted");
@@ -145,6 +160,8 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
     // backend connection error
     upstreamReq.on("error",(err)=>{
         releaseConnection();
+        instance.breaker.failure();
+        recordFailure(instance,err.message);
         console.log("[Proxy] Upstream Error:", err.message);
         if(clientRes.destroyed || clientRes.writableEnded){
             return;
@@ -178,17 +195,20 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
     clientReq.pipe(upstreamReq);
 });
 
+const stopHealthChecks=startHealthChecks(services);
+
 proxyServer.listen(proxy_port,()=>{
     console.log(`Reverse Proxy running on http://localhost:${proxy_port}`);
 });
 
 function shutdown(){
     console.log("[Proxy] Shutting down...");
+    stopHealthChecks();
     proxyServer.close(()=>{
         upstreamAgent.destroy();
         console.log("[Proxy] Server cllosed");
         
     });
 }
-process.on("SIGNINT", shutdown);
+process.on("SIGINT", shutdown);
 process.on("SIGTERM",shutdown);

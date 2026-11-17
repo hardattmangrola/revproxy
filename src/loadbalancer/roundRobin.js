@@ -1,12 +1,12 @@
+const isEligible = require("./eligibility");
+
 class RoundRobin{
     constructor(){
         this.currentIndex=0;
     }
     select(instances){
         // Filter unavialble instance
-        const available=instances.filter(
-            instance=>instance.healthy
-        );
+        const available=instances.filter(isEligible);
         if(available.length===0){
             return null;
         }
