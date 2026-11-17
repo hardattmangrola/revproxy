@@ -2,6 +2,17 @@ const http=require("http");
 const resolveRoute=require("../router/router")
 const proxy_port=8080;
 const timeout=15000;
+const authenticate = require("../middleware/auth");
+const checkIP = require("../middleware/ipFilter");
+const createBodyLimit = require("../middleware/bodyLimit");
+const MAX_BODY_SIZE = 5 * 1024 * 1024;
+const TokenBucketRateLimiter =
+    require("../middleware/rateLimiter");
+
+const rateLimiter = new TokenBucketRateLimiter(
+    10,  // Maximum 10 tokens
+    5    // Refill 5 tokens per second
+);
 const RoundRobin=require("../loadbalancer/roundRobin");
 const WeightedRoundRobin = require("../loadbalancer/weightedRoundRobin");
 const LeastConnections = require("../loadbalancer/leastConnections");
@@ -70,6 +81,42 @@ function filterHeaders(headers){
 const proxyServer=http.createServer((clientReq,clientRes)=>{
     console.log(`[Proxy] Incoming: ${clientReq.method} ${clientReq.url}`);
     
+    if (!authenticate(clientReq, clientRes)) {
+        return;
+    }
+    if (!checkIP(clientReq, clientRes)) {
+        return;
+    }
+
+    const contentLength = clientReq.headers["content-length"];
+    if (contentLength && Number(contentLength) > MAX_BODY_SIZE) {
+        clientRes.writeHead(413, {
+            "Content-Type": "application/json"
+        });
+        clientRes.end(JSON.stringify({
+            error: "Payload Too Large"
+        }));
+        return;
+    }
+
+    const clientIp = clientReq.socket.remoteAddress;
+    const rateLimit = rateLimiter.allowRequest(clientIp);
+    clientRes.setHeader(
+        "X-RateLimit-Remaining",
+        rateLimit.remaining
+    );
+    if (!rateLimit.allowed) {
+        clientRes.writeHead(429, {
+            "Content-Type": "application/json",
+            "Retry-After": rateLimit.retryAfter
+        });
+        clientRes.end(JSON.stringify({
+            error: "Too Many Requests",
+            message: "Rate limit exceeded",
+            retryAfter: rateLimit.retryAfter
+        }));
+        return;
+    }
     // Resolve the destination service
     const resolved=resolveRoute(clientReq.url);
     // Handle unkown routes
@@ -191,8 +238,27 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
             upstreamReq.destroy();
         }
     });
-    // forward request body 
-    clientReq.pipe(upstreamReq);
+    // Forward the request body while enforcing the configured size limit.
+    const bodyLimiter = createBodyLimit(MAX_BODY_SIZE);
+    bodyLimiter.on("error", (err) => {
+        if (err.code === "BODY_TOO_LARGE") {
+            console.log("[Security] Request body limit exceeded");
+            releaseConnection();
+            upstreamReq.destroy();
+
+            if (!clientRes.headersSent && !clientRes.destroyed) {
+                clientRes.writeHead(413, {
+                    "Content-Type": "application/json"
+                });
+                clientRes.end(JSON.stringify({
+                    error: "Payload Too Large",
+                    maxSize: MAX_BODY_SIZE
+                }));
+            }
+        }
+    });
+
+    clientReq.pipe(bodyLimiter).pipe(upstreamReq);
 });
 
 const stopHealthChecks=startHealthChecks(services);
