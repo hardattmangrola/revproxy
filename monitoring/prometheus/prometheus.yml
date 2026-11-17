@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "revproxy"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["revproxy:8080"]
