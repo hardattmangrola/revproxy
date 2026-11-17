@@ -1,10 +1,12 @@
+const BACKEND_HOST = process.env.BACKEND_HOST || "localhost";
+
 const services = {
     users: {
         name: "User Service",
         instances: [
             {
                 id: "users-1",  // Unique identifier for an instance.
-                host: "localhost", 
+                host: BACKEND_HOST,
                 port: 3000,
                 weight: 1, // Relative traffic allocation.
                 activeConnections: 0, // Number of requests currently being processed. 
@@ -21,7 +23,7 @@ const services = {
         instances: [
             {
                 id: "products-1",
-                host: "localhost",
+                host: BACKEND_HOST,
                 port: 3003,
                 weight: 1,
                 activeConnections: 0,
@@ -33,7 +35,7 @@ const services = {
             },
             {
                 id: "products-2",
-                host: "localhost",
+                host: BACKEND_HOST,
                 port: 3004,
                 weight: 2,
                 activeConnections: 0,
@@ -45,7 +47,7 @@ const services = {
             },
             {
                 id: "products-3",
-                host: "localhost",
+                host: BACKEND_HOST,
                 port: 3005,
                 weight: 3,
                 activeConnections: 0,
@@ -62,7 +64,7 @@ const services = {
         instances: [
             {
                 id: "orders-1",
-                host: "localhost",
+                host: BACKEND_HOST,
                 port: 3001,
                 weight: 1,
                 activeConnections: 0,

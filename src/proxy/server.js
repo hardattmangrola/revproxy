@@ -1,5 +1,7 @@
 const http=require("http");
 const resolveRoute=require("../router/router")
+const createObservabilityMiddleware =
+    require("../observability/middleware");
 const proxy_port=8080;
 const timeout=15000;
 const authenticate = require("../middleware/auth");
@@ -78,7 +80,7 @@ function filterHeaders(headers){
     hopByHop.forEach((header)=>delete result[header]);
     return result;
 }
-const proxyServer=http.createServer((clientReq,clientRes)=>{
+const handleProxyRequest = (clientReq, clientRes) => {
     console.log(`[Proxy] Incoming: ${clientReq.method} ${clientReq.url}`);
     
     if (!authenticate(clientReq, clientRes)) {
@@ -259,18 +261,22 @@ const proxyServer=http.createServer((clientReq,clientRes)=>{
     });
 
     clientReq.pipe(bodyLimiter).pipe(upstreamReq);
-});
+};
+
+const observedHandler =
+    createObservabilityMiddleware(handleProxyRequest);
+const server = http.createServer(observedHandler);
 
 const stopHealthChecks=startHealthChecks(services);
 
-proxyServer.listen(proxy_port,()=>{
+server.listen(proxy_port,()=>{
     console.log(`Reverse Proxy running on http://localhost:${proxy_port}`);
 });
 
 function shutdown(){
     console.log("[Proxy] Shutting down...");
     stopHealthChecks();
-    proxyServer.close(()=>{
+    server.close(()=>{
         upstreamAgent.destroy();
         console.log("[Proxy] Server cllosed");
         
